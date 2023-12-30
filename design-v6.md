@@ -70,30 +70,40 @@ pub struct TaskRef {
 
 `ATS-INTC` 的定位是 `UINTC` 的扩展。`UINTC` 中维护接收方状态表，发送方发送 `uipi` 后，接收方的执行流将被打断，在中断处理例程内唤醒对应的任务。这个过程完全由 CPU 来进行。想要将这个过程卸载到 `ATS-INTC` 中，则必须在其中维护 `PScheduler` 及其状态（`PScheduler Table`），`ATS-INTC` 才能唤醒中断处理协程（将中断处理协程添加到 `PScheduler`），等当前任务执行让权后，将会执行中断处理协程，消除了 `UINTC` 的中断抢占开销。
 
-###### 任务唤醒森林：
+###### 任务唤醒示例：
 
 ```mermaid
-flowchart TB
-    subgraph  NIC
-        A(NIC Task) --> B(T1) --> E(T3)
-        A --> C(T2) --> F(T6)
-        B --> G(T4)
-        B --> I(T5)
-        C --> H(T7)
+flowchart RL 
+    subgraph  user task
+        A(accept syscall task)
+        D(listen syscall task)
     end
-    subgraph  SSD
-        K(SSD Task) --> L(T1) --> M(T3)
-        K --> N(T2) --> O(T6)
+    subgraph  Kernel
+        subgraph syscall layer
+            B(accept syscall handler task)
+            E(listen syscall handler task)
+        end
+        subgraph network stack
+            F(update socket status task)
+        end
     end
-    subgraph  IPC
-        P(Send) --> Q(Receive) --> P
+    subgraph  ATS-INTC
+        C(NIC handler task queue)
     end
+    A -.-> |send ipc and blocked| B -.-> |blocked| F
+    F ===> |wake| B ===> |wake| A
+    D -.-> |send ipc and blocked| E -.-> |blocked| F
+    F ===> |wake| E ===> |wake| D
+    F -.-> |blocked| C ===> |wake| F
     
 ```
 
-对于阻塞在外设上的一系列任务，根任务由 `ATS-INTC` 唤醒，而其余任务则由对应依赖关系的父任务唤醒。父任务把子任务对应的 `TaskRef` 添加到子任务所在的地址空间对应的 `PScheduler` 即视为唤醒子任务。
+以进程执行 `accept`、`listen` 系统调用为例，（系统调用转化为 `ipc`，用户进程为发送方，内核作为接收方）。
+1. 用户协程内部调用 `accept`、`listen` 系统调用协程。它们作为一个整体的被阻塞的协程。
+2. 内核的系统调用处理协程发现没有建立 `socket` 连接时，`accept`、 `listen` 系统调用协程把自己对应的 `waker` 注册到网络协议栈更新 `socket` 状态协程的回调函数中，而这个更新 `socket` 状态协程将会被阻塞在 `ATS-INTC` 的网卡阻塞协程队列中。
+3. 当 `ATS-INTC` 处理来自网卡的中断后，它将唤醒更新 `socket` 状态协程，这个协程从网卡中读取网络包并更新 `socket` 状态。一旦 `accept`、`listen` 系统调用处理协程对应的 `socket` 状态发生变化，`accept`、`listen` 系统调用处理协程将会被唤醒，再唤醒用户态的任务。
 
-对于 `IPC` 相关的任务，接收方需要先通过写 `mmio` 寄存器注册接收处理协程（如果接收方为内核，则是在内核初始化时已经注册接收处理协程）。发送方需要等待接收方的结果。
+最后阻塞在网卡上的协程是没有优先级可以区分的，硬件一旦处理网卡中断，就会将这些协程唤醒，放入到最高优先级的队列中。这个 `accept` 和 `listen` 系统调用可以是同一进程内没有依赖关系的两个任务，也可以是不同进程内的任务。
 
 ### IPC 加速
 
