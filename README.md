@@ -11,3 +11,6 @@ openingreport-zfliang2023
 
 The disscussion about this design is under the [disscuss](./discuss/) directory.
 
+## Ideas
+
+Some interesting ideas may arise during the development, I will record them under the [ideas](./ideas/) directory.
